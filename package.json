@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Configuration synchronization tool for Vibe IDEs (Claude Code)",
   "bin": {
-    "cc-devkit": "./bin/cc-devkit.js"
+    "cc-devkit": "bin/cc-devkit.js"
   },
   "files": [
     "bin",
@@ -15,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/jarrett-au/cc-devkit.git"
+    "url": "git+https://github.com/jarrett-au/cc-devkit.git"
   },
   "keywords": [
     "claude-code",
