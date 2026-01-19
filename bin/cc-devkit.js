@@ -45,6 +45,7 @@ async function main() {
         const options = {
             platforms: [],
             scope: process.env.CC_DEVKIT_SCOPE || 'user',
+            from: null, // New option for remote source
             dryRun: false,
             help: false
         };
@@ -58,6 +59,8 @@ async function main() {
                 }
             } else if (arg === '--scope') {
                 options.scope = args[++i];
+            } else if (arg === '--from') {
+                options.from = args[++i];
             } else if (arg === '--dry-run') {
                 options.dryRun = true;
             } else if (arg === '--help') {
@@ -85,19 +88,71 @@ async function main() {
             throw new Error(`Invalid scope: ${options.scope}. Must be 'user' or 'project'.`);
         }
 
+        // --- Step 0: Handle Remote Source ---
+        let sourceCwd = process.cwd();
+        let tempDir = null;
+
+        if (options.from) {
+            log.info(`Fetching configuration from ${options.from}...`);
+            tempDir = path.join(os.tmpdir(), `cc-devkit-${Date.now()}`);
+            const repoUrl = normalizeRepoUrl(options.from);
+            
+            try {
+                // Using git clone for simplicity and robustness
+                // Check if git exists
+                try {
+                    child_process.execSync('git --version', { stdio: 'ignore' });
+                } catch (e) {
+                    throw new Error('Git is required for --from functionality. Please install Git.');
+                }
+
+                // Clone to temp dir
+                if (options.dryRun) {
+                    log.dryRun(`Would clone ${repoUrl} to ${tempDir}`);
+                    // For dry run, we can't proceed with validation of remote files unless we actually clone.
+                    // But cloning is a read-only op for the USER system (temp dir), so maybe we should actually clone?
+                    // Let's actually clone even in dry-run to validate the SOURCE structure, 
+                    // unless it's too heavy. But validation is key.
+                    // Let's clone. It's a temp dir read op.
+                    log.info(`(Dry Run) Cloning repository to inspect structure...`);
+                }
+                
+                child_process.execSync(`git clone ${repoUrl} "${tempDir}" --depth 1`, { stdio: 'inherit' });
+                sourceCwd = tempDir;
+                log.success(`Repository cloned.`);
+
+            } catch (e) {
+                throw new Error(`Failed to fetch remote configuration: ${e.message}`);
+            }
+        }
+
         // 2. Validate Environment (Source files)
         log.info(`Initializing sync for ${options.platforms.join(', ')} (${options.scope} scope)...`);
         
-        const cwd = process.cwd();
-        const missingDirs = CONFIG.requiredSourceDirs.filter(d => !fs.existsSync(path.join(cwd, d)));
-        const missingFiles = CONFIG.requiredSourceFiles.filter(f => !fs.existsSync(path.join(cwd, f)));
+        // Use sourceCwd instead of process.cwd()
+        const missingDirs = CONFIG.requiredSourceDirs.filter(d => !fs.existsSync(path.join(sourceCwd, d)));
+        const missingFiles = CONFIG.requiredSourceFiles.filter(f => !fs.existsSync(path.join(sourceCwd, f)));
 
         if (missingDirs.length > 0 || missingFiles.length > 0) {
-            throw new Error(`Missing required source files/directories:\n` +
+            // Friendly error for empty run
+            if (!options.from && sourceCwd === process.cwd()) {
+                 throw new Error(
+                    `Current directory is not a valid cc-devkit configuration repository.\n` +
+                    `\n` +
+                    `Usage:\n` +
+                    `  1. Sync from a remote repo: npx cc-devkit --init claude --from <user/repo>\n` +
+                    `  2. Sync from current dir:   Run this command inside a valid config repo.\n` +
+                    `\n` +
+                    `Missing required files:\n` +
+                    [...missingDirs.map(d => `  - ${d}/`), ...missingFiles.map(f => `  - ${f}`)].join('\n')
+                );
+            }
+            
+            throw new Error(`Missing required source files/directories in ${options.from ? 'remote repo' : 'current directory'}:\n` +
                 [...missingDirs.map(d => `  - ${d}/`), ...missingFiles.map(f => `  - ${f}`)].join('\n'));
         }
 
-        if (!fs.existsSync(path.join(cwd, 'README.md'))) {
+        if (!fs.existsSync(path.join(sourceCwd, 'README.md'))) {
              // SPEC says README.md is required
              throw new Error('Missing required file: README.md');
         }
@@ -117,7 +172,7 @@ async function main() {
 
         // --- Step 2: Sync Files (commands/ & skills/) ---
         for (const dir of CONFIG.requiredSourceDirs) {
-            const srcDir = path.join(cwd, dir);
+            const srcDir = path.join(sourceCwd, dir);
             const destDir = path.join(targetPaths.dataDir, dir);
             
             logger(`Copying ${dir}...`);
@@ -131,7 +186,7 @@ async function main() {
 
         // --- Step 3: Merge MCP Config ---
         logger(`Merging MCP configs...`);
-        const srcConfigPath = path.join(cwd, 'mcp.json');
+        const srcConfigPath = path.join(sourceCwd, 'mcp.json');
         const count = mergeMcpConfig(srcConfigPath, targetPaths.config, options.dryRun);
         
         if (options.dryRun) {
@@ -142,6 +197,15 @@ async function main() {
 
         console.log("");
         log.success(`Successfully synced to ${options.scope} scope`);
+        
+        // Cleanup temp dir
+        if (tempDir) {
+            try {
+                fs.rmSync(tempDir, { recursive: true, force: true });
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+        }
 
     } catch (err) {
         log.error(err.message);
@@ -150,6 +214,18 @@ async function main() {
 }
 
 // --- Helpers ---
+
+function normalizeRepoUrl(url) {
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('git@')) {
+        return url;
+    }
+    // Assume owner/repo format
+    const parts = url.split('/');
+    if (parts.length === 2) {
+        return `https://github.com/${url}.git`;
+    }
+    throw new Error(`Invalid repository format: ${url}. Use 'owner/repo' or full URL.`);
+}
 
 function getTargetPaths(scope) {
     if (scope === 'user') {
@@ -257,66 +333,24 @@ function mergeMcpConfig(srcPath, destPath, dryRun) {
     }
 
     // Shallow Merge: Project (src) wins
-    // SPEC: "如果服务器名已存在，整个配置替换; 如果服务器名不存在，添加新配置"
-    // This is basically Object.assign or spread, but we specifically target "mcpServers" key?
-    // Wait, SPEC example shows the root object IS the map of servers.
-    // "vibe_kanban": { ... }
-    // BUT standard Claude config usually has "mcpServers": { ... } ?
-    // Let's check SPEC example again.
-    // SPEC says:
-    // {
-    //   "vibe_kanban": { ... }
-    // }
-    // So the mcp.json ROOT is the servers map.
-    // HOWEVER, the target file `.claude.json` typically contains OTHER things too.
-    // If `.claude.json` structure is:
-    // {
-    //   "mcpServers": { ... },
-    //   "otherConfig": ...
-    // }
-    // OR is `.claude.json` JUST for MCP?
-    // Claude Code documentation says:
-    // "You can configure MCP servers in a configuration file."
-    // If the target file `~/.claude.json` is used for other things, we must be careful.
-    // But SPEC implies we are merging the whole object into the target file.
-    // Let's assume the target file structure matches the source file structure (a map of servers),
-    // OR the target file has a specific key.
-    
-    // RE-READING SPEC:
-    // "Mergin MCP configs... Merged 3 MCP servers"
-    // "Source: mcp.json"
-    // "Target: ~/.claude.json"
-    
-    // If I look at how `claude` CLI works, it usually uses `~/.claude/config.json` or similar.
-    // But assuming SPEC is correct and `~/.claude.json` IS the file.
-    // Does `~/.claude.json` contain ONLY mcp servers?
-    // If I am writing a tool for Claude Code, I should know this.
-    // Currently, Claude Code uses `mcpServers` key inside the config?
-    // Or is the whole file just for MCP?
-    // Let's assume based on SPEC example: The source `mcp.json` structure is:
-    // { "serverName": { ... } }
-    //
-    // If the target file is indeed just a map of servers, then `Object.assign` is correct.
-    // If the target file has `mcpServers` key, then we need to merge INTO that key.
-    
-    // **CRITICAL**: The SPEC example for `mcp.json` shows a root object with server keys.
-    // It does NOT show `{"mcpServers": { ... }}`.
-    // So I will assume the `mcp.json` source is a direct map of servers.
-    //
-    // Now, about the TARGET `.claude.json`.
-    // If it contains other config, simply merging `vibe_kanban` at root level is fine IF the config is flat.
-    // If the config expects `mcpServers` key, then we might be breaking it.
-    //
-    // **DECISION**: I will follow the SPEC literally. The SPEC implies merging keys from `mcp.json` into the root of `.claude.json`.
-    // If `.claude.json` has `mcpServers` key, the user should have `mcpServers` key in their `mcp.json`?
-    // No, the example shows `"vibe_kanban": ...` at root.
-    // So I will merge at root.
+    // Logic: Merge keys from mcp.json into the "mcpServers" key of the target config.
+    // If "mcpServers" doesn't exist in target, create it.
     
     const count = Object.keys(srcConfig).length;
-    const newConfig = { ...destConfig, ...srcConfig };
+    
+    // Ensure mcpServers object exists in dest
+    if (!destConfig.mcpServers) {
+        destConfig.mcpServers = {};
+    }
+
+    // Merge srcConfig (which is a map of servers) into destConfig.mcpServers
+    destConfig.mcpServers = {
+        ...destConfig.mcpServers,
+        ...srcConfig
+    };
 
     if (!dryRun) {
-        fs.writeFileSync(destPath, JSON.stringify(newConfig, null, 2));
+        fs.writeFileSync(destPath, JSON.stringify(destConfig, null, 2));
     }
 
     return count;
@@ -328,6 +362,7 @@ Usage: cc-devkit --init <platform> [options]
 
 Options:
   --scope <user|project>   Configuration scope (default: user)
+  --from <url|repo>        Sync from a remote git repository (e.g. user/repo)
   --dry-run                Preview changes without modifying files
   --help                   Show this help message
     `);
