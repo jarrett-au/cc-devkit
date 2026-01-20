@@ -1,6 +1,6 @@
 {
   "name": "cc-devkit",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Configuration synchronization tool for Vibe IDEs (Claude Code)",
   "bin": {
     "cc-devkit": "bin/cc-devkit.js"
