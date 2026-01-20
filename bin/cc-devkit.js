@@ -244,7 +244,7 @@ function getTargetPaths(platform, scope) {
             };
         } else {
             return {
-                config: path.join(cwd, '.claude.json'),
+                config: path.join(cwd, '.mcp.json'),
                 dataDir: path.join(cwd, '.claude')
             };
         }
