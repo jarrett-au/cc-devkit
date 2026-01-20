@@ -2,7 +2,7 @@
 
 /**
  * cc-devkit
- * Configuration synchronization tool for Vibe IDEs (Claude Code)
+ * Configuration synchronization tool for Vibe IDEs (Claude Code, OpenCode)
  */
 
 const fs = require('fs');
@@ -12,7 +12,7 @@ const child_process = require('child_process');
 
 // Configuration
 const CONFIG = {
-    supportedPlatforms: ['claude'],
+    supportedPlatforms: ['claude', 'opencode'],
     requiredSourceDirs: ['commands', 'skills'],
     requiredSourceFiles: ['mcp.json'],
     backupDir: path.join(os.homedir(), '.cc-devkit', 'backups')
@@ -36,6 +36,13 @@ const log = {
     error: (msg) => console.error(`${COLORS.red}✗ Error:${COLORS.reset} ${msg}`),
     dryRun: (msg) => console.log(`${COLORS.cyan}[DRY RUN]${COLORS.reset} ${msg}`)
 };
+
+// Simple JSONC stripper (remove comments) and BOM stripper
+function stripJsonComments(jsonString) {
+    // Strip BOM if present
+    const content = jsonString.replace(/^\uFEFF/, '');
+    return content.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+}
 
 // Main execution
 async function main() {
@@ -109,11 +116,6 @@ async function main() {
                 // Clone to temp dir
                 if (options.dryRun) {
                     log.dryRun(`Would clone ${repoUrl} to ${tempDir}`);
-                    // For dry run, we can't proceed with validation of remote files unless we actually clone.
-                    // But cloning is a read-only op for the USER system (temp dir), so maybe we should actually clone?
-                    // Let's actually clone even in dry-run to validate the SOURCE structure, 
-                    // unless it's too heavy. But validation is key.
-                    // Let's clone. It's a temp dir read op.
                     log.info(`(Dry Run) Cloning repository to inspect structure...`);
                 }
                 
@@ -127,8 +129,6 @@ async function main() {
         }
 
         // 2. Validate Environment (Source files)
-        log.info(`Initializing sync for ${options.platforms.join(', ')} (${options.scope} scope)...`);
-        
         // Use sourceCwd instead of process.cwd()
         const missingDirs = CONFIG.requiredSourceDirs.filter(d => !fs.existsSync(path.join(sourceCwd, d)));
         const missingFiles = CONFIG.requiredSourceFiles.filter(f => !fs.existsSync(path.join(sourceCwd, f)));
@@ -157,46 +157,51 @@ async function main() {
              throw new Error('Missing required file: README.md');
         }
 
-        // 3. Execution
-        const targetPaths = getTargetPaths(options.scope);
+        // 3. Execution per platform
         const logger = options.dryRun ? log.dryRun : log.info;
 
         if (options.dryRun) {
             logger("Dry run mode enabled. No files will be modified.");
         }
 
-        // --- Step 1: Backup ---
-        if (fs.existsSync(targetPaths.config)) {
-            backupFile(targetPaths.config, options.dryRun);
-        }
+        for (const platform of options.platforms) {
+            console.log(""); // Separator
+            log.info(`Initializing sync for ${platform} (${options.scope} scope)...`);
 
-        // --- Step 2: Sync Files (commands/ & skills/) ---
-        for (const dir of CONFIG.requiredSourceDirs) {
-            const srcDir = path.join(sourceCwd, dir);
-            const destDir = path.join(targetPaths.dataDir, dir);
+            const targetPaths = getTargetPaths(platform, options.scope);
             
-            logger(`Copying ${dir}...`);
-            const count = copyDirectory(srcDir, destDir, options.dryRun);
-            if (options.dryRun) {
-                 log.dryRun(`Would copy ${count} files from ${dir}`);
-            } else {
-                 log.success(`Copied ${count} files to ${destDir}`);
+            // --- Step 1: Backup ---
+            if (fs.existsSync(targetPaths.config)) {
+                backupFile(targetPaths.config, options.dryRun);
             }
-        }
 
-        // --- Step 3: Merge MCP Config ---
-        logger(`Merging MCP configs...`);
-        const srcConfigPath = path.join(sourceCwd, 'mcp.json');
-        const count = mergeMcpConfig(srcConfigPath, targetPaths.config, options.dryRun);
-        
-        if (options.dryRun) {
-            log.dryRun(`Would merge ${count} MCP servers`);
-        } else {
-            log.success(`Merged ${count} MCP servers`);
-        }
+            // --- Step 2: Sync Files (commands/ & skills/) ---
+            for (const dir of CONFIG.requiredSourceDirs) {
+                const srcDir = path.join(sourceCwd, dir);
+                const destDir = path.join(targetPaths.dataDir, dir);
+                
+                logger(`Copying ${dir}...`);
+                const count = copyDirectory(srcDir, destDir, options.dryRun);
+                if (options.dryRun) {
+                     log.dryRun(`Would copy ${count} files from ${dir}`);
+                } else {
+                     log.success(`Copied ${count} files to ${destDir}`);
+                }
+            }
 
-        console.log("");
-        log.success(`Successfully synced to ${options.scope} scope`);
+            // --- Step 3: Merge MCP Config ---
+            logger(`Merging MCP configs...`);
+            const srcConfigPath = path.join(sourceCwd, 'mcp.json');
+            const count = mergeMcpConfig(srcConfigPath, targetPaths.config, platform, options.dryRun);
+            
+            if (options.dryRun) {
+                log.dryRun(`Would merge ${count} MCP servers`);
+            } else {
+                log.success(`Merged ${count} MCP servers`);
+            }
+
+            log.success(`Successfully synced to ${platform} (${options.scope} scope)`);
+        }
         
         // Cleanup temp dir
         if (tempDir) {
@@ -227,18 +232,36 @@ function normalizeRepoUrl(url) {
     throw new Error(`Invalid repository format: ${url}. Use 'owner/repo' or full URL.`);
 }
 
-function getTargetPaths(scope) {
-    if (scope === 'user') {
-        return {
-            config: path.join(os.homedir(), '.claude.json'),
-            dataDir: path.join(os.homedir(), '.claude')
-        };
-    } else {
-        return {
-            config: path.join(process.cwd(), '.claude.json'),
-            dataDir: path.join(process.cwd(), '.claude')
-        };
+function getTargetPaths(platform, scope) {
+    const home = os.homedir();
+    const cwd = process.cwd();
+
+    if (platform === 'claude') {
+        if (scope === 'user') {
+            return {
+                config: path.join(home, '.claude.json'),
+                dataDir: path.join(home, '.claude')
+            };
+        } else {
+            return {
+                config: path.join(cwd, '.claude.json'),
+                dataDir: path.join(cwd, '.claude')
+            };
+        }
+    } else if (platform === 'opencode') {
+        if (scope === 'user') {
+            return {
+                config: path.join(home, '.config', 'opencode', 'opencode.json'),
+                dataDir: path.join(home, '.config', 'opencode')
+            };
+        } else {
+            return {
+                config: path.join(cwd, 'opencode.json'),
+                dataDir: path.join(cwd, '.opencode')
+            };
+        }
     }
+    throw new Error(`Unknown platform: ${platform}`);
 }
 
 function backupFile(filePath, dryRun) {
@@ -261,8 +284,6 @@ function backupFile(filePath, dryRun) {
         log.success(`Backed up ${filename} to ${backupPath}`);
 
         // Cleanup old backups (Keep latest 1 for this file type)
-        // SPEC says "Clean old backups, keep only latest"
-        // Let's implement a simple cleanup
         const files = fs.readdirSync(CONFIG.backupDir)
             .filter(f => f.startsWith(`.${filename}.`) && f.endsWith('.backup'))
             .sort() // Timestamp ensures lexicographical order matches time order
@@ -302,15 +323,15 @@ function copyDirectory(src, dest, dryRun) {
     return count;
 }
 
-function mergeMcpConfig(srcPath, destPath, dryRun) {
+function mergeMcpConfig(srcPath, destPath, platform, dryRun) {
     let srcConfig;
     try {
-        srcConfig = JSON.parse(fs.readFileSync(srcPath, 'utf8'));
+        srcConfig = JSON.parse(stripJsonComments(fs.readFileSync(srcPath, 'utf8')));
     } catch (e) {
         throw new Error(`Failed to parse source mcp.json: ${e.message}`);
     }
 
-    // Windows Adaptation
+    // Windows Adaptation (for original Claude format source)
     if (os.platform() === 'win32') {
         for (const key in srcConfig) {
             const server = srcConfig[key];
@@ -321,35 +342,59 @@ function mergeMcpConfig(srcPath, destPath, dryRun) {
         }
     }
 
+    // Convert to OpenCode format if needed
+    if (platform === 'opencode') {
+        const newSrcConfig = {};
+        for (const key in srcConfig) {
+            const server = srcConfig[key];
+            // If it already looks like OpenCode (has "type"), keep it.
+            // Otherwise assume Claude format and convert.
+            if (server.type) {
+                newSrcConfig[key] = server;
+            } else {
+                newSrcConfig[key] = {
+                    type: 'local',
+                    command: [server.command, ...(server.args || [])],
+                    // Map env if exists
+                    ...(server.env ? { environment: server.env } : {}),
+                    enabled: true
+                };
+            }
+        }
+        srcConfig = newSrcConfig;
+    }
+
     let destConfig = {};
     if (fs.existsSync(destPath)) {
         try {
-            destConfig = JSON.parse(fs.readFileSync(destPath, 'utf8'));
+            // Handle comments in JSONC
+            const content = fs.readFileSync(destPath, 'utf8');
+            destConfig = JSON.parse(stripJsonComments(content));
         } catch (e) {
-             // If dest config exists but is invalid, we might want to warn or backup and overwrite.
-             // For now, let's assume valid JSON or fail.
+             // If dest config exists but is invalid, fail.
              throw new Error(`Failed to parse target config ${destPath}: ${e.message}`);
         }
     }
 
-    // Shallow Merge: Project (src) wins
-    // Logic: Merge keys from mcp.json into the "mcpServers" key of the target config.
-    // If "mcpServers" doesn't exist in target, create it.
-    
-    const count = Object.keys(srcConfig).length;
-    
-    // Ensure mcpServers object exists in dest
-    if (!destConfig.mcpServers) {
-        destConfig.mcpServers = {};
+    // Determine config key
+    const configKey = platform === 'opencode' ? 'mcp' : 'mcpServers';
+
+    // Ensure key exists
+    if (!destConfig[configKey]) {
+        destConfig[configKey] = {};
     }
 
-    // Merge srcConfig (which is a map of servers) into destConfig.mcpServers
-    destConfig.mcpServers = {
-        ...destConfig.mcpServers,
+    // Shallow Merge: Project (src) wins
+    const count = Object.keys(srcConfig).length;
+    
+    destConfig[configKey] = {
+        ...destConfig[configKey],
         ...srcConfig
     };
 
     if (!dryRun) {
+        // Ensure directory exists
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
         fs.writeFileSync(destPath, JSON.stringify(destConfig, null, 2));
     }
 
@@ -359,6 +404,10 @@ function mergeMcpConfig(srcPath, destPath, dryRun) {
 function showHelp() {
     console.log(`
 Usage: cc-devkit --init <platform> [options]
+
+Platforms:
+  claude      Anthropic Claude Code
+  opencode    OpenCode
 
 Options:
   --scope <user|project>   Configuration scope (default: user)
