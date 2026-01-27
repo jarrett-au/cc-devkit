@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "test-server": {
+      "command": "echo",
+      "args": ["test"]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-context7"]
+    }
+  }
+}

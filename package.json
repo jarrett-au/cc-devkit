@@ -11,7 +11,13 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:unit": "jest tests/*.test.js",
+    "test:integration": "jest tests/integration*.test.js",
+    "verify-tui": "node verify-tui.js",
+    "test:tui": "node test-tui-run.js"
   },
   "repository": {
     "type": "git",
@@ -29,10 +35,10 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "dependencies": {
-    "blessed": "2.0.0"
-  },
   "optionalDependencies": {
-    "blessed": "2.0.0"
+    "blessed": "^0.1.81"
+  },
+  "devDependencies": {
+    "jest": "^30.2.0"
   }
 }
