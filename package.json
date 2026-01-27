@@ -28,5 +28,11 @@
   "license": "ISC",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "blessed": "2.0.0"
+  },
+  "optionalDependencies": {
+    "blessed": "2.0.0"
   }
 }

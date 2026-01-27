@@ -54,6 +54,7 @@ async function main() {
             scope: process.env.CC_DEVKIT_SCOPE || 'user',
             from: null, // New option for remote source
             dryRun: false,
+            tui: false, // TUI mode
             help: false
         };
 
@@ -70,6 +71,8 @@ async function main() {
                 options.from = args[++i];
             } else if (arg === '--dry-run') {
                 options.dryRun = true;
+            } else if (arg === '--tui') {
+                options.tui = true;
             } else if (arg === '--help') {
                 options.help = true;
             }
@@ -95,7 +98,7 @@ async function main() {
             throw new Error(`Invalid scope: ${options.scope}. Must be 'user' or 'project'.`);
         }
 
-        // --- Step 0: Handle Remote Source ---
+        // --- Step 0: Handle Remote Source (also needed for TUI) ---
         let sourceCwd = process.cwd();
         let tempDir = null;
 
@@ -103,7 +106,7 @@ async function main() {
             log.info(`Fetching configuration from ${options.from}...`);
             tempDir = path.join(os.tmpdir(), `cc-devkit-${Date.now()}`);
             const repoUrl = normalizeRepoUrl(options.from);
-            
+
             try {
                 // Using git clone for simplicity and robustness
                 // Check if git exists
@@ -118,13 +121,41 @@ async function main() {
                     log.dryRun(`Would clone ${repoUrl} to ${tempDir}`);
                     log.info(`(Dry Run) Cloning repository to inspect structure...`);
                 }
-                
+
                 child_process.execSync(`git clone ${repoUrl} "${tempDir}" --depth 1`, { stdio: 'inherit' });
                 sourceCwd = tempDir;
                 log.success(`Repository cloned.`);
 
             } catch (e) {
                 throw new Error(`Failed to fetch remote configuration: ${e.message}`);
+            }
+        }
+
+        // --- TUI Mode ---
+        if (options.tui) {
+            try {
+                const result = await runTuiMode(sourceCwd, options);
+
+                // Cleanup temp dir if needed
+                if (tempDir) {
+                    try {
+                        fs.rmSync(tempDir, { recursive: true, force: true });
+                    } catch (e) {
+                        // Ignore cleanup errors
+                    }
+                }
+
+                return result;
+            } catch (e) {
+                // Cleanup temp dir on error
+                if (tempDir) {
+                    try {
+                        fs.rmSync(tempDir, { recursive: true, force: true });
+                    } catch (cleanupError) {
+                        // Ignore cleanup errors
+                    }
+                }
+                throw e;
             }
         }
 
@@ -412,9 +443,43 @@ Platforms:
 Options:
   --scope <user|project>   Configuration scope (default: user)
   --from <url|repo>        Sync from a remote git repository (e.g. user/repo)
+  --tui                    Launch interactive TUI mode (requires blessed)
   --dry-run                Preview changes without modifying files
   --help                   Show this help message
     `);
+}
+
+/**
+ * Run TUI mode
+ * @param {string} sourceDir - Source directory path
+ * @param {Object} options - Command options
+ * @returns {Promise<boolean>} True if successful
+ */
+async function runTuiMode(sourceDir, options) {
+    try {
+        // Try to require TUI module
+        const { createTUI } = require('../lib/tui');
+
+        log.info('Launching TUI mode...');
+        log.info('Press ? for help, Esc or q to exit');
+
+        const success = createTUI(sourceDir);
+
+        if (!success) {
+            throw new Error('Failed to launch TUI');
+        }
+
+        return true;
+    } catch (e) {
+        if (e.code === 'MODULE_NOT_FOUND') {
+            log.error('TUI mode requires blessed package.');
+            log.info('Install with: npm install blessed');
+            log.info('Or run without --tui flag for CLI mode.');
+        } else {
+            throw e;
+        }
+        return false;
+    }
 }
 
 main().catch(err => {
